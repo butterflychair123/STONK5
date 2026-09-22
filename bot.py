@@ -12,7 +12,7 @@ import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from scraper import get_market_stats, get_wallet_and_fees, get_burned_total, get_top5
+from scraper import get_market_stats, get_wallet_holds, get_burned_total, get_top5
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -44,17 +44,13 @@ def _fmt_stats() -> str:
         lines.append(f"⚠️ Could not fetch price/market data: {e}")
 
     try:
-        wf = get_wallet_and_fees()
+        wallet = get_wallet_holds()
         lines.append(
-            f"⏳ Fees toward next round: `{wf['fees_progress_sol']:.3f} / "
-            f"{wf['fees_target_sol']:.0f} SOL` ({wf['fees_pct']:.1f}%)"
-        )
-        lines.append(
-            f"👛 Wallet holds: `{wf['wallet_sol']:.3f} SOL` "
-            f"({wf['native_sol']:.3f} SOL + {wf['wsol']:.3f} WSOL)"
+            f"👛 Wallet holds: `{wallet['wallet_sol']:.3f} SOL` "
+            f"({wallet['native_sol']:.3f} SOL + {wallet['wsol']:.3f} WSOL)"
         )
     except Exception as e:
-        logger.exception("Failed to fetch wallet/fees")
+        logger.exception("Failed to fetch wallet balance")
         lines.append(f"⚠️ Could not fetch wallet data: {e}")
 
     if len(lines) == 2:
@@ -102,7 +98,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hi! I show price/fee stats and the burned total for $STONK5.\n\n"
         "Commands:\n"
-        "/stat or /fees – price, market cap, liquidity, fees toward next round\n"
+        "/stat or /fees – price, market cap, liquidity, wallet holds\n"
         "/burn – total $STONK5 burned so far (read directly from the chain)\n"
         "/top5 – the current top 5 StonkFun tokens being bought"
     )
