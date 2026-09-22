@@ -12,7 +12,7 @@ import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from scraper import get_homepage_stats, get_burned_total
+from scraper import get_market_stats, get_wallet_and_fees, get_burned_total
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -27,28 +27,33 @@ PORT = int(os.environ.get("PORT", "8080"))
 
 
 def _fmt_stats() -> str:
-    try:
-        home = get_homepage_stats()
-    except Exception as e:
-        logger.exception("Failed to fetch homepage")
-        return f"⚠️ Could not reach stonk5.com: {e}"
-
     lines = ["*$STONK5 — Stats*", ""]
 
-    if home.get("price"):
-        lines.append(f"💲 Price: `{home['price']}`")
-    if home.get("market_cap"):
-        lines.append(f"📊 Market cap: `{home['market_cap']}`")
-    if home.get("liquidity"):
-        lines.append(f"💧 Liquidity: `{home['liquidity']}`")
-    if home.get("fees_progress"):
-        pct = f" ({home['fees_pct']})" if home.get("fees_pct") else ""
-        lines.append(f"⏳ Fees toward next round: `{home['fees_progress']}`{pct}")
-    if home.get("wallet_holds"):
-        lines.append(f"👛 Wallet holds: `{home['wallet_holds']}`")
+    try:
+        market = get_market_stats()
+        if market.get("price_usd") is not None:
+            lines.append(f"💲 Price: `${market['price_usd']:.6f}`")
+        if market.get("market_cap") is not None:
+            lines.append(f"📊 Market cap: `${market['market_cap']:,.0f}`")
+        if market.get("liquidity_usd") is not None:
+            lines.append(f"💧 Liquidity: `${market['liquidity_usd']:,.0f}`")
+    except Exception as e:
+        logger.exception("Failed to fetch market stats")
+        lines.append(f"⚠️ Could not fetch price/market data: {e}")
+
+    try:
+        wf = get_wallet_and_fees()
+        lines.append(
+            f"⏳ Fees toward next round: `{wf['fees_progress_sol']:.3f} / "
+            f"{wf['fees_target_sol']:.0f} SOL` ({wf['fees_pct']:.1f}%)"
+        )
+        lines.append(f"👛 Wallet holds: `{wf['wallet_sol']:.3f} SOL`")
+    except Exception as e:
+        logger.exception("Failed to fetch wallet/fees")
+        lines.append(f"⚠️ Could not fetch wallet data: {e}")
 
     if len(lines) == 2:
-        lines.append("No figures found — the site layout may have changed.")
+        lines.append("No figures found.")
 
     return "\n".join(lines)
 

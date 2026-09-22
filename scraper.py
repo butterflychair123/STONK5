@@ -1,96 +1,98 @@
 """
-Scraper + on-chain lookup for https://stonk5.com/
+Live data lookup for $STONK5 (https://stonk5.com/).
 
-The homepage (price, market cap, liquidity, fees toward next round, wallet
-holds) is server-rendered, so a plain HTTP GET + text parsing is enough.
+Earlier version scraped stonk5.com's homepage HTML directly, but that page's
+numbers are refreshed client-side via JavaScript polling (visible on the site
+as "18s ago" / "2s ago" freshness labels) — the raw HTML the server sends is
+a stale/initial snapshot, not the live value. Scraping it gave numbers that
+lagged badly behind the real site.
 
-The "Burned so far" figure on the /burn-lock page, however, loads client-side
-via JavaScript reading the Solana blockchain directly (the raw HTML shows a
-"reading the chain…" placeholder). Instead of scraping that page, we compute
-the same number the site does: total issued (1,000,000,000, fixed) minus the
-mint's current on-chain supply, fetched with one Solana JSON-RPC call.
+Instead, this module goes straight to the same live sources the site itself
+ultimately reads from:
+  - Price / market cap / liquidity -> DexScreener's public API (same data
+    source most Solana token sites use, including likely stonk5.com itself).
+  - Wallet holds / fees toward next round -> a direct Solana RPC balance
+    check of the public "engine wallet" (fees toward next round is simply
+    that wallet's current SOL balance, capped against the 5 SOL round
+    trigger — confirmed by the two figures being identical on the live
+    site).
+  - Burned total -> total issued (1,000,000,000, fixed) minus the mint's
+    current on-chain supply, via one Solana JSON-RPC call. This is the exact
+    calculation stonk5.com's own frontend does for "Burned so far".
 """
 
-import re
 import requests
-from bs4 import BeautifulSoup
 
-BASE_URL = "https://stonk5.com"
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
-}
 TIMEOUT = 15
 
 # From stonk5.com's own page copy ("Contract address" on the homepage).
 STONK5_MINT = "F7CTvENFnkDJysMhaFFicDT2FwnbW2oasFZGG6WJnar7"
 TOTAL_ISSUED = 1_000_000_000
 
+# The public wallet that collects creator fees between rounds ("Engine
+# wallet" on stonk5.com).
+ENGINE_WALLET = "gPYVhFeYVrfbAruwNVZthfnVdeWjgBUiaSabdpn77B6"
+ROUND_TARGET_SOL = 5.0
+
 # Public Solana RPC endpoint. If this one gets rate-limited, swap in another
 # public RPC (e.g. a free Helius/QuickNode endpoint) here.
 SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 
+DEXSCREENER_URL = f"https://api.dexscreener.com/latest/dex/tokens/{STONK5_MINT}"
 
-def _get_text(path: str) -> str:
-    resp = requests.get(f"{BASE_URL}{path}", headers=HEADERS, timeout=TIMEOUT)
+
+def _rpc(method: str, params: list) -> dict:
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    resp = requests.post(SOLANA_RPC_URL, json=payload, timeout=TIMEOUT)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    return soup.get_text(separator="\n")
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"Solana RPC error ({method}): {data['error']}")
+    return data["result"]
 
 
-def _find_after(
-    label: str, text: str, pattern: str = r"\$[\d][\d,\.]*", same_line: bool = False
-) -> str | None:
-    """Finds the label in the text and returns the next line matching the
-    pattern. By default the label's own line is skipped (the value sits on
-    the line after it on this site); set same_line=True for labels that
-    share a line with their value."""
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    for i, line in enumerate(lines):
-        if label.lower() in line.lower():
-            start = i if same_line else i + 1
-            for j in range(start, min(start + 4, len(lines))):
-                m = re.search(pattern, lines[j])
-                if m:
-                    return m.group().strip()
-    return None
+def get_market_stats() -> dict:
+    """Live price/market cap/liquidity from DexScreener (same style of data
+    source the site's own live ticker uses)."""
+    resp = requests.get(DEXSCREENER_URL, timeout=TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
 
+    pairs = data.get("pairs") or []
+    if not pairs:
+        raise RuntimeError("No trading pairs found on DexScreener for this token")
 
-def get_homepage_stats() -> dict:
-    text = _get_text("/")
+    # Pick the pair with the highest liquidity (most representative price).
+    pair = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+
     return {
-        "price": _find_after("Price", text, r"\$[\d\.]+"),
-        "market_cap": _find_after("Market cap", text, r"\$[\d,\.]+"),
-        "liquidity": _find_after("Liquidity", text, r"\$[\d,\.]+"),
-        "fees_progress": _find_after(
-            "Fees toward next round", text, r"[\d\.]+\s*/\s*[\d\.]+\s*SOL"
-        ),
-        "fees_pct": _find_after(
-            "Fees toward next round", text, r"[\d\.]+%"
-        ),
-        "wallet_holds": _find_after("Wallet holds", text, r"[\d\.]+\s*SOL"),
+        "price_usd": float(pair["priceUsd"]) if pair.get("priceUsd") else None,
+        "market_cap": pair.get("marketCap"),
+        "liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
+    }
+
+
+def get_wallet_and_fees() -> dict:
+    """Wallet holds = current SOL balance of the engine wallet. Fees toward
+    next round is the same balance, shown as progress toward the 5 SOL
+    round trigger."""
+    result = _rpc("getBalance", [ENGINE_WALLET])
+    lamports = result["value"]
+    sol = lamports / 1_000_000_000
+
+    return {
+        "wallet_sol": sol,
+        "fees_progress_sol": sol,
+        "fees_target_sol": ROUND_TARGET_SOL,
+        "fees_pct": min(sol / ROUND_TARGET_SOL, 1.0) * 100,
     }
 
 
 def get_burned_total() -> dict:
     """Computes the burned total the same way stonk5.com does: total issued
     minus the mint's current on-chain supply."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTokenSupply",
-        "params": [STONK5_MINT],
-    }
-    resp = requests.post(SOLANA_RPC_URL, json=payload, timeout=TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-
-    if "error" in data:
-        raise RuntimeError(f"Solana RPC error: {data['error']}")
-
-    current_supply = float(data["result"]["value"]["uiAmountString"])
+    result = _rpc("getTokenSupply", [STONK5_MINT])
+    current_supply = float(result["value"]["uiAmountString"])
     burned = TOTAL_ISSUED - current_supply
     pct = (burned / TOTAL_ISSUED) * 100
 
@@ -104,5 +106,6 @@ def get_burned_total() -> dict:
 if __name__ == "__main__":
     import json
 
-    print("Homepage:", json.dumps(get_homepage_stats(), indent=2, ensure_ascii=False))
+    print("Market:", json.dumps(get_market_stats(), indent=2, ensure_ascii=False))
+    print("Wallet/fees:", json.dumps(get_wallet_and_fees(), indent=2, ensure_ascii=False))
     print("Burned:", json.dumps(get_burned_total(), indent=2, ensure_ascii=False))
