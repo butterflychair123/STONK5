@@ -12,7 +12,7 @@ import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from scraper import get_market_stats, get_wallet_holds, get_burned_total, get_top5
+from scraper import get_market_stats, get_wallet_holds, get_round_timer, get_burned_total, get_top5
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -56,6 +56,18 @@ def _fmt_stats() -> str:
     except Exception as e:
         logger.exception("Failed to fetch wallet balance")
         lines.append(f"⚠️ Could not fetch wallet data: {e}")
+
+    try:
+        timer = get_round_timer()
+        if timer["due"]:
+            lines.append("⏰ Next round: `due now`")
+        else:
+            h = int(timer["remaining_hours"])
+            m = int((timer["remaining_hours"] - h) * 60)
+            lines.append(f"⏰ Next round in: `~{h}h {m:02d}m` (or sooner if 5 SOL is reached)")
+    except Exception as e:
+        logger.exception("Failed to fetch round timer")
+        lines.append(f"⚠️ Could not determine round timer: {e}")
 
     if len(lines) == 2:
         lines.append("No figures found.")
