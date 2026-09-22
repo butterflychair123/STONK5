@@ -32,7 +32,9 @@ def _fmt_stats() -> str:
     try:
         market = get_market_stats()
         if market.get("price_usd") is not None:
-            lines.append(f"💲 Price: `${market['price_usd']:.6f}`")
+            change = market.get("price_change_24h")
+            change_str = f" ({change:+.1f}% 24h)" if change is not None else ""
+            lines.append(f"💲 Price: `${market['price_usd']:.6f}`{change_str}")
         if market.get("market_cap") is not None:
             lines.append(f"📊 Market cap: `${market['market_cap']:,.0f}`")
         if market.get("liquidity_usd") is not None:
