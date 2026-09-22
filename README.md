@@ -1,34 +1,48 @@
 # $STONK5 Telegram Bot
 
-Shows price/fee stats and the total burned amount for [$STONK5](https://stonk5.com/) on request.
+Shows price/fee stats, burned total, and locked-tokens total for
+[$STONK5](https://stonk5.com/) on request.
 
 ## Commands
 
-- `/stat` — price, market cap, liquidity, fees toward next round, wallet holds
-- `/burned` — total $STONK5 burned so far, read directly from the Solana blockchain
+- `/stat` or `/fees` — price, market cap, liquidity, wallet holds, round timer
+- `/burn` — total $STONK5 burned so far, read directly from the Solana blockchain
+- `/locked` — tokens locked in Jupiter Lock's 5-year escrow + waiting in the vault
+- `/top5` — the current top 5 StonkFun tokens fee-swaps are buying
 - `/start` — help
 
 ## How it works
 
-- `/stat` scrapes the server-rendered homepage HTML of stonk5.com — the same
-  technique as the 4STONK bot.
-- `/burned` does **not** scrape the `/burn-lock` page, because that page's
-  figures are loaded client-side by JavaScript reading the blockchain (the
-  raw HTML just shows a "reading the chain…" placeholder). Instead,
-  `scraper.py` makes one Solana JSON-RPC call (`getTokenSupply`) for the
-  $STONK5 mint and computes `burned = 1,000,000,000 - current_supply` — the
-  exact same calculation stonk5.com's own frontend does.
+All figures are read live from on-chain data or APIs — nothing is scraped
+from stonk5.com's HTML anymore, since its numbers refresh client-side via
+JavaScript polling and the raw server HTML is a stale snapshot.
 
-**Not included (by design, to keep this simple):** the exact number of
-tokens already locked in Jupiter Lock's 5-year escrow. That figure isn't
-exposed through the token's own supply and would require decoding Jupiter
-Lock's on-chain program accounts — a good deal more work than the rest of
-this bot. Let me know if you want that added later.
+- **Price / market cap / liquidity**: Jupiter's Price V3 API (falls back to
+  DexScreener).
+- **Wallet holds**: direct Solana RPC balance check (native SOL + WSOL) of
+  the public "engine wallet". This is *not* the same as "fees toward next
+  round" — the wallet balance also includes a rent reserve and any manually
+  topped-up spare SOL, and there's no RPC call that exposes that split, so
+  the bot only reports the honest total with a disclaimer.
+- **Round timer**: detected as the most recent transaction where the engine
+  wallet's combined SOL+WSOL balance dropped sharply (a heuristic, since
+  there's no structured "round" event to read directly).
+- **Burned total**: `1,000,000,000 - current on-chain supply`, via one
+  `getTokenSupply` RPC call — the same calculation stonk5.com's own frontend
+  does.
+- **Locked total**: `/locked` shows two numbers — "in the vault" (a direct
+  token-balance check of the public vault address that accumulates $STONK5
+  before its weekly sweep) and "locked" (tokens already swept into Jupiter
+  Lock's 5-year escrow). The escrow total isn't exposed by a single RPC
+  call, so it's reconstructed by scanning the vault's transaction history
+  for its periodic outgoing transfers and summing them — the same
+  heuristic technique used for the round timer. Like the round timer, this
+  may need threshold tuning (`LOCK_SWEEP_THRESHOLD_TOKENS` in
+  `scraper.py`) if the number doesn't match stonk5.com's own `/burn-lock`
+  page — send back the bot's output and the real numbers if so.
 
-**Note:** if stonk5.com changes its page layout, `_find_after` in
-`scraper.py` may need updating — run `python3 scraper.py` to check what it
-finds. If the mint address or total-issued supply ever changes, update
-`STONK5_MINT` / `TOTAL_ISSUED` at the top of `scraper.py`.
+**Note:** if the mint address, engine wallet, vault address, or total-issued
+supply ever change, update the constants at the top of `scraper.py`.
 
 ## Setup
 
