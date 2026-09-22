@@ -9,13 +9,18 @@ lagged badly behind the real site.
 
 Instead, this module goes straight to the same live sources the site itself
 ultimately reads from:
-  - Price / market cap / liquidity -> DexScreener's public API (same data
-    source most Solana token sites use, including likely stonk5.com itself).
-  - Wallet holds / fees toward next round -> a direct Solana RPC balance
-    check of the public "engine wallet" (fees toward next round is simply
-    that wallet's current SOL balance, capped against the 5 SOL round
-    trigger — confirmed by the two figures being identical on the live
-    site).
+  - Price / market cap / liquidity -> Jupiter's Price V3 API (falls back to
+    DexScreener, which persistently 429s from some hosting providers'
+    shared IPs).
+  - Wallet holds -> a direct Solana RPC balance check (native SOL + WSOL) of
+    the public "engine wallet". NOTE: this total is not the same as the
+    site's "Rewards" figure that actually drives round progress — the
+    wallet balance also includes a Rent reserve and any manually topped-up
+    Spare SOL, and there's no RPC call that exposes that split.
+  - Round timer -> the timestamp of the last "round" transaction (detected
+    as the most recent transaction where the engine wallet's SOL balance
+    dropped sharply) via Helius's transaction history, used to compute time
+    remaining until the 5-hour trigger.
   - Burned total -> total issued (1,000,000,000, fixed) minus the mint's
     current on-chain supply, via one Solana JSON-RPC call. This is the exact
     calculation stonk5.com's own frontend does for "Burned so far".
@@ -23,10 +28,7 @@ ultimately reads from:
 RPC calls go through Helius (needs a free HELIUS_API_KEY, see
 https://www.helius.dev) instead of the public api.mainnet-beta.solana.com
 endpoint, which is heavily shared/rate-limited and unreliable from a
-hosting provider's shared IPs. Helius doesn't offer liquidity data or
-prices for unverified tokens, so price/market cap/liquidity still come from
-DexScreener — made more resilient with a browser-like User-Agent, a short
-cache, and one retry on a 429.
+hosting provider's shared IPs.
 """
 
 import os
@@ -193,6 +195,98 @@ def get_wallet_holds() -> dict:
         "wallet_sol": total_sol,
         "native_sol": native_sol,
         "wsol": wsol,
+    }
+
+
+ROUND_INTERVAL_HOURS = 5.0
+# A round spends from the wallet: burn + lock + basket buy + payouts. Any
+# single transaction that drops the wallet's COMBINED SOL+WSOL balance by at
+# least this much is treated as a round having happened (small drops are
+# just normal fee-forwarding/rent, not a round settling).
+ROUND_DROP_THRESHOLD_SOL = 0.05
+
+
+def _wsol_balance_from_tx(balances: list, owner: str) -> float:
+    """Reads the WSOL uiAmount owned by `owner` from a pre/postTokenBalances
+    array (0.0 if that owner had no WSOL entry in this transaction). Token
+    balance entries are indexed by token-account position, not by owner
+    account index, so this matches on the "owner" and "mint" fields rather
+    than an account index."""
+    for entry in balances or []:
+        if entry.get("owner") == owner and entry.get("mint") == WSOL_MINT:
+            return float(entry["uiTokenAmount"]["uiAmount"] or 0)
+    return 0.0
+
+
+def get_round_timer() -> dict:
+    """Finds the most recent 'round' transaction via Helius transaction
+    history, and computes time remaining until the 5-hour trigger.
+
+    A round is detected as a transaction where the engine wallet's COMBINED
+    native SOL + WSOL balance drops sharply — checking the combined total
+    (not just native SOL) avoids a false positive when the wallet simply
+    wraps SOL into WSOL ahead of a round: that shows up as a big native-SOL
+    decrease but isn't an actual outflow, since the WSOL balance rises by
+    the same amount in the same transaction.
+
+    This is still a heuristic, not a check that the funds specifically went
+    to buying the current Top 5 (that would need matching swap instructions
+    against the live Top 5 mint list, which changes hour to hour — more
+    involved than detecting *that* a round-sized outflow happened). If the
+    output looks wrong, ROUND_DROP_THRESHOLD_SOL may need tuning, or the
+    scan window (limit=25 below) may need to be larger."""
+    signatures = _rpc("getSignaturesForAddress", [ENGINE_WALLET, {"limit": 25}])
+
+    last_round_time = None
+    for sig_info in signatures:
+        if sig_info.get("err") is not None:
+            continue
+        signature = sig_info["signature"]
+        tx = _rpc(
+            "getTransaction",
+            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+        )
+        if not tx:
+            continue
+
+        try:
+            account_keys = tx["transaction"]["message"]["accountKeys"]
+            idx = next(
+                i
+                for i, k in enumerate(account_keys)
+                if (k.get("pubkey") if isinstance(k, dict) else k) == ENGINE_WALLET
+            )
+            pre_sol = tx["meta"]["preBalances"][idx]
+            post_sol = tx["meta"]["postBalances"][idx]
+        except (KeyError, IndexError, StopIteration, TypeError):
+            continue
+
+        pre_wsol = _wsol_balance_from_tx(tx["meta"].get("preTokenBalances"), ENGINE_WALLET)
+        post_wsol = _wsol_balance_from_tx(tx["meta"].get("postTokenBalances"), ENGINE_WALLET)
+
+        pre_total = pre_sol / 1_000_000_000 + pre_wsol
+        post_total = post_sol / 1_000_000_000 + post_wsol
+        drop_sol = pre_total - post_total
+
+        if drop_sol >= ROUND_DROP_THRESHOLD_SOL:
+            last_round_time = sig_info.get("blockTime")
+            break
+
+    if last_round_time is None:
+        raise RuntimeError(
+            "Could not find a recent round transaction in the last 25 "
+            "signatures — the wallet may not have had a round recently, or "
+            "the detection threshold needs adjusting"
+        )
+
+    elapsed_hours = (time.time() - last_round_time) / 3600
+    remaining_hours = max(0.0, ROUND_INTERVAL_HOURS - elapsed_hours)
+
+    return {
+        "last_round_timestamp": last_round_time,
+        "elapsed_hours": elapsed_hours,
+        "remaining_hours": remaining_hours,
+        "due": remaining_hours <= 0,
     }
 
 
