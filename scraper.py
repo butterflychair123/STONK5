@@ -24,6 +24,12 @@ ultimately reads from:
   - Burned total -> total issued (1,000,000,000, fixed) minus the mint's
     current on-chain supply, via one Solana JSON-RPC call. This is the exact
     calculation stonk5.com's own frontend does for "Burned so far".
+  - Lock stats -> "In the vault" is a direct token-balance check of the
+    public vault address. "Locked" (already committed to Jupiter Lock's
+    5-year escrow) isn't exposed by a single call, so it's reconstructed by
+    scanning the vault's transaction history for its periodic outgoing
+    transfers (the weekly sweep into Jupiter Lock) and summing them —
+    same technique as the round timer below.
 
 RPC calls go through Helius (needs a free HELIUS_API_KEY, see
 https://www.helius.dev) instead of the public api.mainnet-beta.solana.com
@@ -49,6 +55,11 @@ ENGINE_WALLET = "gPYVhFeYVrfbAruwNVZthfnVdeWjgBUiaSabdpn77B6"
 # Wrapped SOL mint — fees can sit in the wallet as native SOL or as a WSOL
 # token balance, so "wallet holds" needs to add both together.
 WSOL_MINT = "So11111111111111111111111111111111111111112"
+
+# The vault that accumulates $STONK5 bought for locking, before its weekly
+# sweep into Jupiter Lock's 5-year escrow ("Burn and lock" page on
+# stonk5.com — "the vault address is 9ezeAq8ozEuUru4vFaEXQBn56fdUF7SQoQ4xSTs3Pko").
+VAULT_ADDRESS = "9ezeAq8ozEuUru4vFaEXQBn56fdUF7SQoQ4xSTs3Pko"
 
 HELIUS_API_KEY = os.environ["HELIUS_API_KEY"]
 SOLANA_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
@@ -160,18 +171,22 @@ def get_market_stats() -> dict:
     return result
 
 
-def _get_wsol_balance(owner: str) -> float:
-    """Sums the WSOL (wrapped SOL) token balance(s) held by an owner
-    address. Returns 0.0 if the owner has no WSOL token account."""
+def _get_token_balance(owner: str, mint: str) -> float:
+    """Sums the token balance(s) of a given mint held by an owner address.
+    Returns 0.0 if the owner has no token account for that mint."""
     result = _rpc(
         "getTokenAccountsByOwner",
-        [owner, {"mint": WSOL_MINT}, {"encoding": "jsonParsed"}],
+        [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
     )
     total = 0.0
     for entry in result.get("value", []):
         parsed = entry["account"]["data"]["parsed"]["info"]
         total += float(parsed["tokenAmount"]["uiAmount"] or 0)
     return total
+
+
+def _get_wsol_balance(owner: str) -> float:
+    return _get_token_balance(owner, WSOL_MINT)
 
 
 def get_wallet_holds() -> dict:
@@ -347,6 +362,90 @@ def get_burned_total() -> dict:
     }
 
 
+# Any single transaction where the vault's STONK5 balance drops by at least
+# this much is treated as a sweep into Jupiter Lock (not routine dust).
+LOCK_SWEEP_THRESHOLD_TOKENS = 1.0
+
+_lock_cache: dict = {"data": None, "fetched_at": 0.0}
+_LOCK_CACHE_TTL = 900  # seconds — locks only happen weekly, no need to rescan often
+
+
+def get_lock_stats() -> dict:
+    """"In the vault" = current $STONK5 balance of the public vault address
+    (bought, waiting for the weekly sweep). "Locked" = total $STONK5 ever
+    swept out of the vault into Jupiter Lock's 5-year escrow, reconstructed
+    by scanning the vault's transaction history for its periodic outgoing
+    transfers and summing them (same technique as get_round_timer).
+
+    This is a heuristic: it assumes any transaction where the vault's
+    STONK5 balance drops by at least LOCK_SWEEP_THRESHOLD_TOKENS was a
+    sweep to Jupiter Lock, not some other kind of outgoing transfer. If the
+    "locked" figure looks wrong compared to stonk5.com's own /burn-lock
+    page, that threshold — or MAX_SIGNATURES_TO_SCAN below — may need
+    adjusting. The scan can be a lot of sequential RPC calls (every round
+    deposits into the vault, so its full history can be long), so the
+    result is cached for _LOCK_CACHE_TTL seconds."""
+    now = time.time()
+    if _lock_cache["data"] is not None and now - _lock_cache["fetched_at"] < _LOCK_CACHE_TTL:
+        return _lock_cache["data"]
+
+    in_vault = _get_token_balance(VAULT_ADDRESS, STONK5_MINT)
+
+    PAGE_SIZE = 100
+    MAX_SIGNATURES_TO_SCAN = 1000
+
+    total_locked = 0.0
+    before = None
+    scanned = 0
+
+    while scanned < MAX_SIGNATURES_TO_SCAN:
+        params = [VAULT_ADDRESS, {"limit": PAGE_SIZE}]
+        if before:
+            params[1]["before"] = before
+        signatures = _rpc("getSignaturesForAddress", params)
+        if not signatures:
+            break
+
+        for sig_info in signatures:
+            scanned += 1
+            before = sig_info["signature"]
+            if sig_info.get("err") is not None:
+                continue
+            tx = _rpc(
+                "getTransaction",
+                [before, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            )
+            if not tx:
+                continue
+
+            pre_bal = None
+            post_bal = None
+            for entry in tx["meta"].get("preTokenBalances") or []:
+                if entry.get("owner") == VAULT_ADDRESS and entry.get("mint") == STONK5_MINT:
+                    pre_bal = float(entry["uiTokenAmount"]["uiAmount"] or 0)
+            for entry in tx["meta"].get("postTokenBalances") or []:
+                if entry.get("owner") == VAULT_ADDRESS and entry.get("mint") == STONK5_MINT:
+                    post_bal = float(entry["uiTokenAmount"]["uiAmount"] or 0)
+
+            if pre_bal is None or post_bal is None:
+                continue
+
+            drop = pre_bal - post_bal
+            if drop >= LOCK_SWEEP_THRESHOLD_TOKENS:
+                total_locked += drop
+
+    result = {
+        "in_vault": in_vault,
+        "locked": total_locked,
+        "together": in_vault + total_locked,
+        "pct_of_supply": ((in_vault + total_locked) / TOTAL_ISSUED) * 100,
+        "scanned_signatures": scanned,
+    }
+    _lock_cache["data"] = result
+    _lock_cache["fetched_at"] = now
+    return result
+
+
 def _pick(d: dict, *candidates, default=None):
     """Tries several possible key names (including dotted paths like
     'stats.marketCap') since the exact field names of StonkFun's API
@@ -365,6 +464,10 @@ def _pick(d: dict, *candidates, default=None):
     return default
 
 
+_top5_cache: dict = {"data": None, "fetched_at": 0.0}
+_TOP5_CACHE_TTL = 60  # seconds
+
+
 def get_top5() -> list[dict]:
     """The current Top 5 StonkFun tokens by market cap that stonk5.com's
     fee-swaps buy into. Mirrors stonk5.com's own basket rule: tokens
@@ -381,9 +484,21 @@ def get_top5() -> list[dict]:
     since StonkFun's exact response schema wasn't confirmed via a live
     call while building this. If the output looks wrong (missing names,
     zero volume, STONK missing, etc.), send the /top5 output back and the
-    field names in _pick() below can be corrected."""
+    field names in _pick() below can be corrected.
+
+    StonkFun's API has been observed to be slow/unresponsive at times, so
+    this uses a longer timeout, retries once before giving up, and caches
+    the result briefly so repeated /top5 calls don't hammer a slow API."""
+    now = time.time()
+    if _top5_cache["data"] is not None and now - _top5_cache["fetched_at"] < _TOP5_CACHE_TTL:
+        return _top5_cache["data"]
+
     params = {"sort": "marketCap", "pageSize": 25}
-    resp = requests.get(STONKFUN_TOKENS_URL, params=params, timeout=TIMEOUT)
+    STONKFUN_TIMEOUT = 25
+    try:
+        resp = requests.get(STONKFUN_TOKENS_URL, params=params, timeout=STONKFUN_TIMEOUT)
+    except requests.exceptions.RequestException:
+        resp = requests.get(STONKFUN_TOKENS_URL, params=params, timeout=STONKFUN_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
 
@@ -415,7 +530,10 @@ def get_top5() -> list[dict]:
         )
 
     candidates.sort(key=lambda t: t["market_cap"] or 0, reverse=True)
-    return candidates[:5]
+    result = candidates[:5]
+    _top5_cache["data"] = result
+    _top5_cache["fetched_at"] = now
+    return result
 
 
 if __name__ == "__main__":
@@ -424,4 +542,5 @@ if __name__ == "__main__":
     print("Market:", json.dumps(get_market_stats(), indent=2, ensure_ascii=False))
     print("Wallet:", json.dumps(get_wallet_holds(), indent=2, ensure_ascii=False))
     print("Burned:", json.dumps(get_burned_total(), indent=2, ensure_ascii=False))
+    print("Locked:", json.dumps(get_lock_stats(), indent=2, ensure_ascii=False))
     print("Top 5:", json.dumps(get_top5(), indent=2, ensure_ascii=False))
