@@ -6,8 +6,7 @@ Shows price/fee stats, burned total, and locked-tokens total for
 ## Commands
 
 - `/stat` or `/fees` — price, market cap, liquidity, wallet holds, round timer
-- `/burn` — total $STONK5 burned so far, read directly from the Solana blockchain
-- `/locked` — tokens locked in Jupiter Lock's 5-year escrow + waiting in the vault
+- `/burn`, `/burned`, `/lock` or `/locked` — burned total + locked/vault totals in one overview
 - `/top5` — the current top 5 StonkFun tokens fee-swaps are buying
 - `/start` — help
 
@@ -30,14 +29,15 @@ JavaScript polling and the raw server HTML is a stale snapshot.
 - **Burned total**: `1,000,000,000 - current on-chain supply`, via one
   `getTokenSupply` RPC call — the same calculation stonk5.com's own frontend
   does.
-- **Locked total**: `/locked` shows two numbers — "in the vault" (a direct
-  token-balance check of the public vault address that accumulates $STONK5
-  before its weekly sweep) and "locked" (tokens already swept into Jupiter
-  Lock's 5-year escrow). The escrow total isn't exposed by a single RPC
-  call, so it's reconstructed by scanning the vault's transaction history
-  for its periodic outgoing transfers and summing them — the same
-  heuristic technique used for the round timer. Like the round timer, this
-  may need threshold tuning (`LOCK_SWEEP_THRESHOLD_TOKENS` in
+- **Locked total**: `/burn` (same as `/locked`) shows the burned total plus
+  two more numbers — "in the vault" (a direct token-balance check of the
+  public vault address that accumulates $STONK5 before its weekly sweep)
+  and "locked" (tokens already swept into Jupiter Lock's 5-year escrow),
+  plus a combined burned+locked+vault total. The escrow total isn't exposed
+  by a single RPC call, so it's reconstructed by scanning the vault's
+  transaction history for its periodic outgoing transfers and summing them
+  — the same heuristic technique used for the round timer. Like the round
+  timer, this may need threshold tuning (`LOCK_SWEEP_THRESHOLD_TOKENS` in
   `scraper.py`) if the number doesn't match stonk5.com's own `/burn-lock`
   page — send back the bot's output and the real numbers if so.
 
