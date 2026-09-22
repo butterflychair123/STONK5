@@ -232,51 +232,66 @@ def get_round_timer() -> dict:
     This is still a heuristic, not a check that the funds specifically went
     to buying the current Top 5 (that would need matching swap instructions
     against the live Top 5 mint list, which changes hour to hour — more
-    involved than detecting *that* a round-sized outflow happened). If the
-    output looks wrong, ROUND_DROP_THRESHOLD_SOL may need tuning, or the
-    scan window (limit=25 below) may need to be larger."""
-    signatures = _rpc("getSignaturesForAddress", [ENGINE_WALLET, {"limit": 25}])
+    involved than detecting *that* a round-sized outflow happened). Every
+    trade forwards its own small fee to this wallet as a separate
+    transaction, so a single page of recent signatures may not reach back
+    far enough to find the last round — this pages back through up to
+    MAX_SIGNATURES_TO_SCAN signatures if needed. If the output still looks
+    wrong, ROUND_DROP_THRESHOLD_SOL may need tuning."""
+    PAGE_SIZE = 100
+    MAX_SIGNATURES_TO_SCAN = 500
 
     last_round_time = None
-    for sig_info in signatures:
-        if sig_info.get("err") is not None:
-            continue
-        signature = sig_info["signature"]
-        tx = _rpc(
-            "getTransaction",
-            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
-        )
-        if not tx:
-            continue
+    before = None
+    scanned = 0
 
-        try:
-            account_keys = tx["transaction"]["message"]["accountKeys"]
-            idx = next(
-                i
-                for i, k in enumerate(account_keys)
-                if (k.get("pubkey") if isinstance(k, dict) else k) == ENGINE_WALLET
-            )
-            pre_sol = tx["meta"]["preBalances"][idx]
-            post_sol = tx["meta"]["postBalances"][idx]
-        except (KeyError, IndexError, StopIteration, TypeError):
-            continue
-
-        pre_wsol = _wsol_balance_from_tx(tx["meta"].get("preTokenBalances"), ENGINE_WALLET)
-        post_wsol = _wsol_balance_from_tx(tx["meta"].get("postTokenBalances"), ENGINE_WALLET)
-
-        pre_total = pre_sol / 1_000_000_000 + pre_wsol
-        post_total = post_sol / 1_000_000_000 + post_wsol
-        drop_sol = pre_total - post_total
-
-        if drop_sol >= ROUND_DROP_THRESHOLD_SOL:
-            last_round_time = sig_info.get("blockTime")
+    while scanned < MAX_SIGNATURES_TO_SCAN and last_round_time is None:
+        params = [ENGINE_WALLET, {"limit": PAGE_SIZE}]
+        if before:
+            params[1]["before"] = before
+        signatures = _rpc("getSignaturesForAddress", params)
+        if not signatures:
             break
+
+        for sig_info in signatures:
+            scanned += 1
+            before = sig_info["signature"]
+            if sig_info.get("err") is not None:
+                continue
+            tx = _rpc(
+                "getTransaction",
+                [before, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            )
+            if not tx:
+                continue
+
+            try:
+                account_keys = tx["transaction"]["message"]["accountKeys"]
+                idx = next(
+                    i
+                    for i, k in enumerate(account_keys)
+                    if (k.get("pubkey") if isinstance(k, dict) else k) == ENGINE_WALLET
+                )
+                pre_sol = tx["meta"]["preBalances"][idx]
+                post_sol = tx["meta"]["postBalances"][idx]
+            except (KeyError, IndexError, StopIteration, TypeError):
+                continue
+
+            pre_wsol = _wsol_balance_from_tx(tx["meta"].get("preTokenBalances"), ENGINE_WALLET)
+            post_wsol = _wsol_balance_from_tx(tx["meta"].get("postTokenBalances"), ENGINE_WALLET)
+
+            pre_total = pre_sol / 1_000_000_000 + pre_wsol
+            post_total = post_sol / 1_000_000_000 + post_wsol
+            drop_sol = pre_total - post_total
+
+            if drop_sol >= ROUND_DROP_THRESHOLD_SOL:
+                last_round_time = sig_info.get("blockTime")
+                break
 
     if last_round_time is None:
         raise RuntimeError(
-            "Could not find a recent round transaction in the last 25 "
-            "signatures — the wallet may not have had a round recently, or "
-            "the detection threshold needs adjusting"
+            f"Could not find a round transaction in the last {scanned} "
+            "signatures — the detection threshold may need adjusting"
         )
 
     elapsed_hours = (time.time() - last_round_time) / 3600
