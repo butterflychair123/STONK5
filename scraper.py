@@ -205,6 +205,14 @@ ROUND_INTERVAL_HOURS = 5.0
 # just normal fee-forwarding/rent, not a round settling).
 ROUND_DROP_THRESHOLD_SOL = 0.05
 
+# The scan behind this can mean dozens of sequential RPC calls in the worst
+# case, so the *timestamp* of the last round is cached — it only changes
+# once per round (~every 5h), there's no need to re-scan on every /stat
+# call. The remaining-time countdown is still recomputed fresh from "now"
+# each call, using the cached timestamp.
+_round_cache: dict = {"last_round_time": None, "fetched_at": 0.0}
+_ROUND_CACHE_TTL = 300  # seconds
+
 
 def _wsol_balance_from_tx(balances: list, owner: str) -> float:
     """Reads the WSOL uiAmount owned by `owner` from a pre/postTokenBalances
@@ -237,7 +245,23 @@ def get_round_timer() -> dict:
     transaction, so a single page of recent signatures may not reach back
     far enough to find the last round — this pages back through up to
     MAX_SIGNATURES_TO_SCAN signatures if needed. If the output still looks
-    wrong, ROUND_DROP_THRESHOLD_SOL may need tuning."""
+    wrong, ROUND_DROP_THRESHOLD_SOL may need tuning.
+
+    The scan result (the timestamp itself) is cached for _ROUND_CACHE_TTL
+    seconds — the scan can be dozens of sequential RPC calls in the worst
+    case, and the last-round timestamp only changes once per round anyway."""
+    now = time.time()
+    cached = _round_cache["last_round_time"]
+    if cached is not None and now - _round_cache["fetched_at"] < _ROUND_CACHE_TTL:
+        elapsed_hours = (now - cached) / 3600
+        remaining_hours = max(0.0, ROUND_INTERVAL_HOURS - elapsed_hours)
+        return {
+            "last_round_timestamp": cached,
+            "elapsed_hours": elapsed_hours,
+            "remaining_hours": remaining_hours,
+            "due": remaining_hours <= 0,
+        }
+
     PAGE_SIZE = 100
     MAX_SIGNATURES_TO_SCAN = 500
 
@@ -294,7 +318,10 @@ def get_round_timer() -> dict:
             "signatures — the detection threshold may need adjusting"
         )
 
-    elapsed_hours = (time.time() - last_round_time) / 3600
+    _round_cache["last_round_time"] = last_round_time
+    _round_cache["fetched_at"] = now
+
+    elapsed_hours = (now - last_round_time) / 3600
     remaining_hours = max(0.0, ROUND_INTERVAL_HOURS - elapsed_hours)
 
     return {
