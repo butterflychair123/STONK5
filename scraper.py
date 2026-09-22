@@ -480,11 +480,16 @@ def get_top5() -> list[dict]:
     by status risked silently excluding it, so this only sorts by market
     cap and applies the $10k/day volume floor.
 
-    Field names are guessed defensively (_pick tries several candidates)
-    since StonkFun's exact response schema wasn't confirmed via a live
-    call while building this. If the output looks wrong (missing names,
-    zero volume, STONK missing, etc.), send the /top5 output back and the
-    field names in _pick() below can be corrected.
+    Confirmed live response shape (fetched 2026-09-22):
+        {"data": {"tokens": [ { "name", "symbol", "market": {
+            "marketCapUsd", "volume24hUsd", ... }, "status", ... } ],
+            "pagination": {...} }, "meta": {...}}
+    i.e. the token list is at data.tokens, and market-cap/volume live
+    under each token's nested "market" object as marketCapUsd/volume24hUsd
+    — NOT top-level "marketCap"/"volume24h" as originally guessed (that
+    mismatch was the bug behind "/top5" returning "No qualifying tokens
+    found"). _pick still tries a couple of fallback spellings in case the
+    API changes shape again.
 
     StonkFun's API has been observed to be slow/unresponsive at times, so
     this uses a longer timeout, retries once before giving up, and caches
@@ -502,13 +507,26 @@ def get_top5() -> list[dict]:
     resp.raise_for_status()
     data = resp.json()
 
-    tokens = data if isinstance(data, list) else _pick(data, "tokens", "data", "items", default=[])
+    tokens = (
+        data
+        if isinstance(data, list)
+        else _pick(data, "data.tokens", "tokens", "data", "items", default=[])
+    )
 
     candidates = []
     for t in tokens:
-        market_cap = _pick(t, "marketCap", "market_cap", "stats.marketCap", "market.cap")
+        market_cap = _pick(
+            t, "market.marketCapUsd", "marketCapUsd", "marketCap", "market_cap", "stats.marketCap"
+        )
         volume = _pick(
-            t, "volume24h", "volume24H", "volume_24h", "stats.volume24h", "volume.h24", default=0
+            t,
+            "market.volume24hUsd",
+            "volume24hUsd",
+            "volume24h",
+            "volume24H",
+            "volume_24h",
+            "stats.volume24h",
+            default=0,
         )
         name = _pick(t, "name", "tokenName", default="?")
         symbol = _pick(t, "symbol", "ticker", default="?")
