@@ -43,7 +43,6 @@ TOTAL_ISSUED = 1_000_000_000
 # The public wallet that collects creator fees between rounds ("Engine
 # wallet" on stonk5.com).
 ENGINE_WALLET = "gPYVhFeYVrfbAruwNVZthfnVdeWjgBUiaSabdpn77B6"
-ROUND_TARGET_SOL = 5.0
 
 # Wrapped SOL mint — fees can sit in the wallet as native SOL or as a WSOL
 # token balance, so "wallet holds" needs to add both together.
@@ -173,11 +172,18 @@ def _get_wsol_balance(owner: str) -> float:
     return total
 
 
-def get_wallet_and_fees() -> dict:
+def get_wallet_holds() -> dict:
     """Wallet holds = native SOL balance of the engine wallet PLUS any
-    wrapped SOL (WSOL) token balance it holds — fees can accumulate as
-    either. Fees toward next round is the same combined total, shown as
-    progress toward the 5 SOL round trigger."""
+    wrapped SOL (WSOL) token balance it holds.
+
+    Note: this total is NOT the same as "fees toward next round" on
+    stonk5.com. The site's own tooltip breaks the wallet balance into three
+    parts — Rewards (counts toward the 5 SOL round trigger), Rent (reserved
+    for opening payout accounts), and Spare (manually topped up, unused) —
+    and only Rewards drives the round progress bar. There's no RPC call that
+    exposes that split; it's internal accounting on stonk5's side based on
+    its own transaction history. So this only reports the honest total
+    wallet balance, without claiming it equals round progress."""
     native_result = _rpc("getBalance", [ENGINE_WALLET])
     native_sol = native_result["value"] / 1_000_000_000
     wsol = _get_wsol_balance(ENGINE_WALLET)
@@ -187,9 +193,6 @@ def get_wallet_and_fees() -> dict:
         "wallet_sol": total_sol,
         "native_sol": native_sol,
         "wsol": wsol,
-        "fees_progress_sol": total_sol,
-        "fees_target_sol": ROUND_TARGET_SOL,
-        "fees_pct": min(total_sol / ROUND_TARGET_SOL, 1.0) * 100,
     }
 
 
@@ -283,6 +286,6 @@ if __name__ == "__main__":
     import json
 
     print("Market:", json.dumps(get_market_stats(), indent=2, ensure_ascii=False))
-    print("Wallet/fees:", json.dumps(get_wallet_and_fees(), indent=2, ensure_ascii=False))
+    print("Wallet:", json.dumps(get_wallet_holds(), indent=2, ensure_ascii=False))
     print("Burned:", json.dumps(get_burned_total(), indent=2, ensure_ascii=False))
     print("Top 5:", json.dumps(get_top5(), indent=2, ensure_ascii=False))
