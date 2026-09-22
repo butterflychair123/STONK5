@@ -49,6 +49,10 @@ def _fmt_stats() -> str:
             f"👛 Wallet holds: `{wallet['wallet_sol']:.3f} SOL` "
             f"({wallet['native_sol']:.3f} SOL + {wallet['wsol']:.3f} WSOL)"
         )
+        lines.append(
+            "_Note: not all of this pays out next round — some is reserved "
+            "as rent, and some may be spare SOL topped up by hand._"
+        )
     except Exception as e:
         logger.exception("Failed to fetch wallet balance")
         lines.append(f"⚠️ Could not fetch wallet data: {e}")
