@@ -70,11 +70,11 @@ DEXSCREENER_HEADERS = {
 _market_cache: dict = {"data": None, "fetched_at": 0.0}
 _MARKET_CACHE_TTL = 20  # seconds
 
-# Fallback price source if DexScreener blocks the request (Render's shared
-# IPs get 429'd persistently, not just per-burst — a single retry doesn't
-# help). Jupiter's price API is a different provider that has been more
-# tolerant of datacenter IPs in practice.
-JUPITER_PRICE_URL = "https://price.jup.ag/v6/price"
+# Primary price source. DexScreener persistently 429s from Render's shared
+# IPs (not just a burst limit — retries don't help), so Jupiter's Price V3
+# API is tried first; it also conveniently includes liquidity and 24h price
+# change. DexScreener is kept as a fallback in case Jupiter is ever down.
+JUPITER_PRICE_URL = "https://api.jup.ag/price/v3"
 
 
 def _rpc(method: str, params: list) -> dict:
@@ -110,18 +110,19 @@ def _market_stats_from_dexscreener() -> dict:
 
 
 def _market_stats_from_jupiter() -> dict:
-    """Fallback when DexScreener is unreachable: price from Jupiter's price
-    API, market cap computed from that price times the current on-chain
-    supply (via Helius). No liquidity figure is available this way."""
+    """Price + liquidity from Jupiter's Price V3 API. Market cap isn't
+    returned directly, so it's computed from price times the current
+    on-chain supply (via Helius, one extra RPC call)."""
     resp = requests.get(JUPITER_PRICE_URL, params={"ids": STONK5_MINT}, timeout=TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
 
-    entry = (data.get("data") or {}).get(STONK5_MINT)
-    if not entry or entry.get("price") is None:
-        raise RuntimeError("No price found on Jupiter for this token either")
+    entry = data.get(STONK5_MINT)
+    if not entry or entry.get("usdPrice") is None:
+        raise RuntimeError("No price found on Jupiter for this token")
 
-    price = float(entry["price"])
+    price = float(entry["usdPrice"])
+    liquidity = entry.get("liquidity")
 
     supply_result = _rpc("getTokenSupply", [STONK5_MINT])
     current_supply = float(supply_result["value"]["uiAmountString"])
@@ -129,27 +130,28 @@ def _market_stats_from_jupiter() -> dict:
     return {
         "price_usd": price,
         "market_cap": price * current_supply,
-        "liquidity_usd": None,
+        "liquidity_usd": float(liquidity) if liquidity is not None else None,
+        "price_change_24h": entry.get("priceChange24h"),
     }
 
 
 def get_market_stats() -> dict:
-    """Live price/market cap/liquidity, cached briefly. Tries DexScreener
-    first (has liquidity data); falls back to Jupiter's price API + on-chain
-    supply if DexScreener is blocking the request (this happens persistently
-    from some hosting providers' shared IPs, not just as a burst limit)."""
+    """Live price/market cap/liquidity, cached briefly. Tries Jupiter's
+    Price V3 API first (reliable from Render's shared IPs, also includes
+    liquidity and 24h price change); falls back to DexScreener if Jupiter
+    is ever unavailable."""
     now = time.time()
     if _market_cache["data"] is not None and now - _market_cache["fetched_at"] < _MARKET_CACHE_TTL:
         return _market_cache["data"]
 
     try:
-        result = _market_stats_from_dexscreener()
-    except Exception as dex_error:
+        result = _market_stats_from_jupiter()
+    except Exception as jup_error:
         try:
-            result = _market_stats_from_jupiter()
-        except Exception as jup_error:
+            result = _market_stats_from_dexscreener()
+        except Exception as dex_error:
             raise RuntimeError(
-                f"DexScreener failed ({dex_error}); Jupiter fallback also failed ({jup_error})"
+                f"Jupiter failed ({jup_error}); DexScreener fallback also failed ({dex_error})"
             )
 
     _market_cache["data"] = result
