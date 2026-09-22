@@ -82,36 +82,35 @@ def _fmt_stats() -> str:
     return "\n".join(lines)
 
 
-def _fmt_burned() -> str:
+def _fmt_burn_lock() -> str:
+    lines = ["*$STONK5 — Burn & Lock*", ""]
+
     try:
         burned = get_burned_total()
+        lines.append(f"🔥 Burned so far: `{burned['burned']:,.0f}` $STONK5")
+        lines.append(f"🪙 Current supply: `{burned['current_supply']:,.0f}` $STONK5")
     except Exception as e:
         logger.exception("Failed to fetch burned total")
-        return f"⚠️ Could not fetch on-chain burn data: {e}"
+        lines.append(f"⚠️ Could not fetch on-chain burn data: {e}")
 
-    lines = ["*$STONK5 — Burned*", ""]
-    lines.append(f"🔥 Burned so far: `{burned['burned']:,.0f}` $STONK5")
-    lines.append(f"📉 That's `{burned['pct_of_supply']:.3f}%` of the 1,000,000,000 issued")
-    lines.append(f"🪙 Current supply: `{burned['current_supply']:,.0f}` $STONK5")
-
-    return "\n".join(lines)
-
-
-def _fmt_locked() -> str:
     try:
         lock = get_lock_stats()
+        lines.append(f"🔒 Locked (5-year escrow): `{lock['locked']:,.0f}` $STONK5")
+        lines.append(f"⏳ In the vault (waiting to be locked): `{lock['in_vault']:,.0f}` $STONK5")
     except Exception as e:
         logger.exception("Failed to fetch lock stats")
-        return f"⚠️ Could not fetch on-chain lock data: {e}"
+        lines.append(f"⚠️ Could not fetch on-chain lock data: {e}")
 
-    lines = ["*$STONK5 — Burn & Lock*", ""]
-    lines.append(f"🔒 Locked (5-year escrow): `{lock['locked']:,.0f}` $STONK5")
-    lines.append(f"⏳ In the vault (waiting to be locked): `{lock['in_vault']:,.0f}` $STONK5")
-    lines.append(f"📦 Together: `{lock['together']:,.0f}` $STONK5 ({lock['pct_of_supply']:.3f}% of 1,000,000,000 issued)")
+    if "burned" in locals() and "lock" in locals():
+        total = burned["burned"] + lock["together"]
+        pct = (total / 1_000_000_000) * 100
+        lines.append(f"📦 Burned + locked + vault: `{total:,.0f}` $STONK5 ({pct:.3f}% of 1,000,000,000 issued)")
+
     lines.append(
-        "\n_Locked is reconstructed by scanning the vault's transaction "
-        "history for its weekly sweeps into Jupiter Lock — a best-effort "
-        "estimate, not a value read directly off a single account._"
+        "\n_Burned is read directly from the chain. Locked is reconstructed "
+        "by scanning the vault's transaction history for its weekly sweeps "
+        "into Jupiter Lock — a best-effort estimate, not a value read "
+        "directly off a single account._"
     )
 
     return "\n".join(lines)
@@ -142,8 +141,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Hi! I show price/fee stats and the burned total for $STONK5.\n\n"
         "Commands:\n"
         "/stat or /fees – price, market cap, liquidity, wallet holds\n"
-        "/burn – total $STONK5 burned so far (read directly from the chain)\n"
-        "/locked – tokens locked in Jupiter Lock + waiting in the vault\n"
+        "/burn, /burned, /lock or /locked – burned total + locked/vault totals in one overview\n"
         "/top5 – the current top 5 StonkFun tokens being bought"
     )
 
@@ -153,15 +151,11 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def burned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_markdown(_fmt_burned())
+    await update.message.reply_markdown(_fmt_burn_lock())
 
 
 async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_markdown(_fmt_top5())
-
-
-async def locked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_markdown(_fmt_locked())
 
 
 def main() -> None:
@@ -169,8 +163,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler(["stat", "fees"], stats))
-    app.add_handler(CommandHandler("burn", burned))
-    app.add_handler(CommandHandler("locked", locked))
+    app.add_handler(CommandHandler(["burn", "burned", "lock", "locked"], burned))
     app.add_handler(CommandHandler("top5", top5))
 
     if WEBHOOK_URL:
