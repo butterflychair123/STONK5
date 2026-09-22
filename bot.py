@@ -12,7 +12,14 @@ import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from scraper import get_market_stats, get_wallet_holds, get_round_timer, get_burned_total, get_top5
+from scraper import (
+    get_market_stats,
+    get_wallet_holds,
+    get_round_timer,
+    get_burned_total,
+    get_lock_stats,
+    get_top5,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -90,6 +97,26 @@ def _fmt_burned() -> str:
     return "\n".join(lines)
 
 
+def _fmt_locked() -> str:
+    try:
+        lock = get_lock_stats()
+    except Exception as e:
+        logger.exception("Failed to fetch lock stats")
+        return f"⚠️ Could not fetch on-chain lock data: {e}"
+
+    lines = ["*$STONK5 — Burn & Lock*", ""]
+    lines.append(f"🔒 Locked (5-year escrow): `{lock['locked']:,.0f}` $STONK5")
+    lines.append(f"⏳ In the vault (waiting to be locked): `{lock['in_vault']:,.0f}` $STONK5")
+    lines.append(f"📦 Together: `{lock['together']:,.0f}` $STONK5 ({lock['pct_of_supply']:.3f}% of 1,000,000,000 issued)")
+    lines.append(
+        "\n_Locked is reconstructed by scanning the vault's transaction "
+        "history for its weekly sweeps into Jupiter Lock — a best-effort "
+        "estimate, not a value read directly off a single account._"
+    )
+
+    return "\n".join(lines)
+
+
 def _fmt_top5() -> str:
     try:
         top5 = get_top5()
@@ -116,6 +143,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Commands:\n"
         "/stat or /fees – price, market cap, liquidity, wallet holds\n"
         "/burn – total $STONK5 burned so far (read directly from the chain)\n"
+        "/locked – tokens locked in Jupiter Lock + waiting in the vault\n"
         "/top5 – the current top 5 StonkFun tokens being bought"
     )
 
@@ -132,12 +160,17 @@ async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_markdown(_fmt_top5())
 
 
+async def locked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_markdown(_fmt_locked())
+
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler(["stat", "fees"], stats))
     app.add_handler(CommandHandler("burn", burned))
+    app.add_handler(CommandHandler("locked", locked))
     app.add_handler(CommandHandler("top5", top5))
 
     if WEBHOOK_URL:
